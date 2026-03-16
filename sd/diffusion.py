@@ -37,7 +37,50 @@ class Upsample(nn.Module):
     def __init__(self, channels: int):
         super().__init__()
         self.conv = nn.Conv2d(channels, channels, kernel_size = 3, padding = 1)
-            
+    def forward(self, x):
+        # (batch, features, height, width) -> (batch, features, height * 2, width * 2)
+        x = F.interpolate(x, scale_factor = 2, mode = "nearest")
+        return self.conv(x)
+    
+# Aux for "UNET" class
+# relating latent with time embedding so the output depends on the combination of both
+class UNET_ResidualBlock(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int, n_time = 1280):
+        super().__init__()
+        self.groupnorm_feature = nn.GroupNorm(32, in_channels)
+        self.conv_feature = nn.conv2d(in_channels, out_channels, kernel_size = 3, padding = 1)
+        self.linear_time = nn.Linear(n_time, out_channels)
+        
+        self.groupnorm_merged = nn.GroupNorm(32, out_channels)
+        self.conv_merged = nn.Conv2d(out_channels, out_channels, kernel_size = 3, padding = 1)
+        
+        # if in channels equals to out channels, we directly connect them with residual connection
+        if in_channels == out_channels:
+            self.residual_layer = nn.Identity()
+        else:
+            # create convolution to match sizes
+            self.residual_layer = nn.Conv2d(in_channels, out_channels, kernel_size = 1, padding = 0)
+    def forward(self, feature, time):
+        # feature latent: (batch, in_channels, height, width)
+        # time (1, 1280)
+        residue = feature 
+        # residual block is usually: normalization + activation + skip con
+        feature = self.groupnorm_feature(feature)
+        feature = F.silu(feature)
+        feature = self.conv_feature(feature)
+        time = F.silu(time)
+        time = self.linear_time(time)
+        merged = feature + time.unsqueeze(-1).unsqueeze(-1)
+        merged = self.groupnorm_merged(merged)
+        merged = F.silu(merged)
+        merged = self.conv_merged(merged)
+        return merged + self.residual_layer(residue)
+
+
+# aux for "UNET" class
+class UNET_AttentionBlock(nn.Module):
+    def __init__(self, n_head: int, n_embd: int, d_context = 768):
+
 # Auxillary for "Diffusion" class
 class UNET(nn.Module):
     def __init__(self):
@@ -88,6 +131,20 @@ class UNET(nn.Module):
             SwitchSequential(UNET_ResidualBlock(640, 320), UNET_AttentionBlock(8, 40)),
             SwitchSequential(UNET_ResidualBlock(640, 320), UNET_AttentionBlock(8, 40)), # (batch, 320, height/8, width/8)
         ])
+        
+# Aux for "Diffusion"
+class UNET_OutputLayer(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int):
+        super().__init__()
+        self.groupnorm = nn.GroupNorm(32, in_channels)
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size = 3, padding = 1)
+    def forward(self, x):
+        # x input: (batch, 320, height/8, width/8)
+        x = self.groupnorm(x)
+        x = F.silu(x)
+        # (batch, 4, height/8, width/8)
+        x = self.conv(x)
+        return x
 
 # U-Net
 class Diffusion(nn.Module):
