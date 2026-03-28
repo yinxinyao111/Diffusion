@@ -77,14 +77,14 @@ def generate(prompt: str,
         latents_shape = (1, 4, LATENTS_HEIGHT, LATENTS_WIDTH)
         
         # for image to image generation
-        if input_image:
+        if input_image is not None:
             encoder = models["encoder"]
             encoder.to(device)
             
-            input_image_tensor = input_image.resize((WIDTH, HEIGHT))
+            input_image_tensor = input_image.convert("RGB").resize((WIDTH, HEIGHT))
             input_image_tensor = np.array(input_image_tensor)
             # (H, W, C = 3)
-            input_image_tensor = torch.tensor(input_image_tensor, dtype = torch.float32)
+            input_image_tensor = torch.tensor(input_image_tensor, dtype = torch.float32, device = device)
             
             input_image_tensor = rescale(input_image_tensor, (0, 255), (-1, 1))
             # (batch, H, W, C)
@@ -133,6 +133,7 @@ def generate(prompt: str,
         to_idle(diffusion)
         
         decoder = models["decoder"]
+        decoder.to(device)
         images = decoder(latents) # actually just 1 image
         
         images = rescale(images, (-1, 1), (0, 255), clamp = True)
