@@ -1,0 +1,17 @@
+# Model weights and checkpoints
+*.ckpt
+*.safetensors
+*.pt
+*.pth
+*.bin
+*.onnx
+
+# Common data directories for large artifacts
+data/
+
+# Python caches
+__pycache__/
+*.pyc
+
+# Jupyter
+.ipynb_checkpoints/

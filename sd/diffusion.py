@@ -19,7 +19,7 @@ class TimeEmbedding(nn.Module):
         return x
 
 # Auxillary for "UNET" class
-def SwitchSequential(nn.Sequential):
+class SwitchSequential(nn.Sequential):
     def forward(self, x: torch.Tensor, context: torch.Tensor, time: torch.Tensor) -> torch.Tensor:
         for layer in self:
             if isinstance(layer, UNET_AttentionBlock):
@@ -48,7 +48,7 @@ class UNET_ResidualBlock(nn.Module):
     def __init__(self, in_channels: int, out_channels: int, n_time = 1280):
         super().__init__()
         self.groupnorm_feature = nn.GroupNorm(32, in_channels)
-        self.conv_feature = nn.conv2d(in_channels, out_channels, kernel_size = 3, padding = 1)
+        self.conv_feature = nn.Conv2d(in_channels, out_channels, kernel_size = 3, padding = 1)
         self.linear_time = nn.Linear(n_time, out_channels)
         
         self.groupnorm_merged = nn.GroupNorm(32, out_channels)
@@ -80,12 +80,74 @@ class UNET_ResidualBlock(nn.Module):
 # aux for "UNET" class
 class UNET_AttentionBlock(nn.Module):
     def __init__(self, n_head: int, n_embd: int, d_context = 768):
+        super().__init__()
+        channels = n_head * n_embd
+        self.groupnorm = nn.GroupNorm(32, channels, eps = 1e-6)
+        self.conv_input = nn.Conv2d(channels, channels, kernel_size = 1, padding = 0)
+        
+        self.layernorm_1 = nn.LayerNorm(channels)
+        self.attention_1 = SelfAttention(n_head, channels, in_proj_bias=False)
+        self.layernorm_2 = nn.LayerNorm(channels)
+        self.attention_2 = CrossAttention(n_head, channels, d_context, in_proj_bias = False)
+        self.layernorm_3 = nn.LayerNorm(channels)
+        self.linear_geglu_1 = nn.Linear(channels, 4 * channels * 2)
+        self.linear_geglu_2 = nn.Linear(4 * channels, channels)
+        
+        self.conv_output = nn.Conv2d(channels, channels, kernel_size = 1, padding = 0)
+    def forward(self, x, context):
+        # x: (batch, features, height, width)
+        # context: (batch, seq_len, d_model = 768)
+        
+        residue_long = x
+        x = self.groupnorm(x)
+        
+        x = self.conv_input(x)
+        
+        n, c, h, w = x.shape
+        
+        # (batch, features, height, width) -> (batch, features, height*width)
+        x = x.view((n, c, h*w))
+        # (batch, height * width, features)
+        x = x.transpose(-1, -2)
+        # normalization + self attention with skip connection
+        residue_short = x # apply right after attention
+        
+        x = self.layernorm_1(x)
+        x = self.attention_1(x)
+        x += residue_short
+        
+        residue_short = x
+        
+        # normalization + cross attention with skip connection
+        x = self.layernorm_2(x)
+        x = self.attention_2(x, context) # cross att between latent and prompt
+        x += residue_short
+        
+        residue_short = x
+        
+        # normalization + FF with GeGLU and skip connection
+        x = self.layernorm_3(x)
+        
+        x, gate = self.linear_geglu_1(x).chunk(2, dim = -1)
+        x = x * F.gelu(gate)
+        
+        x = self.linear_geglu_2(x)
+        x += residue_short
+        
+        # (batch, height * width, features) -> (batch, features, height * width)
+        x = x.transpose(-1, -2)
+        
+        x = x.view((n, c, h, w))
+        
+        return self.conv_output(x) + residue_long
+        
+        
 
 # Auxillary for "Diffusion" class
 class UNET(nn.Module):
     def __init__(self):
         super().__init__()
-        self.encoders = nn.Module([
+        self.encoders = nn.ModuleList([
             # given a list of layers, will apply them one by one
             
             # Encoder: reducing image size but gradually increasing features per pixel
@@ -112,7 +174,7 @@ class UNET(nn.Module):
         self.bottleneck = SwitchSequential(
             UNET_ResidualBlock(1280, 1280),
             UNET_AttentionBlock(8, 160), # cross attention
-            UNET_ResidualBlock(1280 1280)
+            UNET_ResidualBlock(1280, 1280)
         )
         
         # Decoder
@@ -131,7 +193,24 @@ class UNET(nn.Module):
             SwitchSequential(UNET_ResidualBlock(640, 320), UNET_AttentionBlock(8, 40)),
             SwitchSequential(UNET_ResidualBlock(640, 320), UNET_AttentionBlock(8, 40)), # (batch, 320, height/8, width/8)
         ])
+    def forward(self, x, context, time):
+        # x: (Batch_Size, 4, Height / 8, Width / 8)
+        # context: (Batch_Size, Seq_Len, Dim) 
+        # time: (1, 1280)
+
+        skip_connections = []
+        for layers in self.encoders:
+            x = layers(x, context, time)
+            skip_connections.append(x)
+
+        x = self.bottleneck(x, context, time)
+
+        for layers in self.decoders:
+            # Since we always concat with the skip connection of the encoder, the number of features increases before being sent to the decoder's layer
+            x = torch.cat((x, skip_connections.pop()), dim=1) 
+            x = layers(x, context, time)
         
+        return x
 # Aux for "Diffusion"
 class UNET_OutputLayer(nn.Module):
     def __init__(self, in_channels: int, out_channels: int):
@@ -149,6 +228,7 @@ class UNET_OutputLayer(nn.Module):
 # U-Net
 class Diffusion(nn.Module):
     def __init__(self):
+        super().__init__()
         # give the U-Net the noisified image & time step at which it was noisified
         self.time_embedding = TimeEmbedding(320)
         self.unet = UNET()
