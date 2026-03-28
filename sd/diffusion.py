@@ -4,6 +4,7 @@ from torch.nn import functional as F
 from attention import SelfAttention, CrossAttention
 
 # Auxillary for "Diffusion" class
+# 
 class TimeEmbedding(nn.Module):
     def __init__(self, n_embd: int):
         super().__init__()

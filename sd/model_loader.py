@@ -5,7 +5,7 @@ from diffusion import Diffusion
 import model_converter
 
 def preload_models_from_standard_weights(ckpt_path, device):
-    # convert all variable names
+    # convert all variable names (to match the weights of original v1-5 model)
     state_dict = model_converter.load_from_standard_weights(ckpt_path, device)
     
     encoder = VAE_Encoder().to(device)
